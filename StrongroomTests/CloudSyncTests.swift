@@ -122,7 +122,9 @@ final class CloudSyncTests: XCTestCase {
         let shared = try await phone.importPhoto(Data("shared".utf8))
         try await sync.sync(phone)
 
-        let tablet = try await XCTUnwrap(CloudSync.restore(phrase: phrase, storage: try device(), store: store, iterations: fast))
+        let tabletStorage = try device()
+        let restoredTablet = try await CloudSync.restore(phrase: phrase, storage: tabletStorage, store: store, iterations: fast)
+        let tablet = try XCTUnwrap(restoredTablet)
 
         // Concurrent edits: phone adds A and deletes the shared item; tablet adds B and renames nothing.
         let a = try await phone.importPhoto(Data("from phone".utf8))
@@ -138,7 +140,7 @@ final class CloudSyncTests: XCTestCase {
         XCTAssertEqual(phoneIDs, [a.id, b.id])
         XCTAssertEqual(tabletIDs, [a.id, b.id])
         // The deleted item's blob is gone from the tablet and from the store.
-        XCTAssertFalse(tablet.storage.exists(shared.blobName))
+        XCTAssertFalse(tabletStorage.exists(shared.blobName))
         XCTAssertEqual(store.blobs.count, 2)
         let phoneItems = await phone.items
         let bOnPhone = try XCTUnwrap(phoneItems.first { $0.id == b.id })
