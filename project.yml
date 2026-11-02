@@ -24,6 +24,9 @@ targets:
         UILaunchScreen: {}
         UIApplicationSupportsIndirectInputEvents: true
         UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
+        NSCameraUsageDescription: Take photos and videos straight into your vault. Nothing is saved to your camera roll.
+        NSMicrophoneUsageDescription: Record sound with videos you capture into your vault.
+        NSPhotoLibraryUsageDescription: Delete originals from your photo library after you've moved them into the vault.
         UISupportedInterfaceOrientations~ipad:
           - UIInterfaceOrientationPortrait
           - UIInterfaceOrientationPortraitUpsideDown
