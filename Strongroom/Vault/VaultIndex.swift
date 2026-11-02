@@ -62,6 +62,8 @@ struct VaultIndex: Codable, Sendable {
     struct Settings: Codable, Hashable, Sendable {
         /// The vault's recovery phrase, kept so it can be shown again while unlocked.
         var recoveryPhrase: String?
+        /// File name of the header that the recovery phrase opens (phrase-derived, same on every device).
+        var recoveryHeaderName: String?
         /// Opening this vault wipes every other vault on the device.
         var isDuress = false
         var backupEnabled = true
@@ -72,6 +74,7 @@ struct VaultIndex: Codable, Sendable {
         init(from decoder: Decoder) throws {
             let c = try decoder.container(keyedBy: CodingKeys.self)
             recoveryPhrase = try c.decodeIfPresent(String.self, forKey: .recoveryPhrase)
+            recoveryHeaderName = try c.decodeIfPresent(String.self, forKey: .recoveryHeaderName)
             isDuress = try c.decodeIfPresent(Bool.self, forKey: .isDuress) ?? false
             backupEnabled = try c.decodeIfPresent(Bool.self, forKey: .backupEnabled) ?? true
             shares = try c.decodeIfPresent([ShareRecord].self, forKey: .shares) ?? []

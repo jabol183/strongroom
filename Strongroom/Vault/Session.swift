@@ -10,6 +10,10 @@ final class Session: ObservableObject {
         case locked
         case unlocking
         case confirmingNew(first: Pattern, pending: Vault.PendingVault)
+        /// A vault was just created; show its recovery phrase before entering.
+        case newVaultPhrase(Vault)
+        /// Opened with the recovery phrase; the user draws a new pattern (twice).
+        case choosingPattern(Vault, first: Pattern?)
         case unlocked(Vault)
     }
 
@@ -27,9 +31,12 @@ final class Session: ObservableObject {
         if storage == nil { message = "Storage couldn't be prepared." }
     }
 
+    /// The open vault, in any state where one is open.
     var vault: Vault? {
-        if case .unlocked(let vault) = state { return vault }
-        return nil
+        switch state {
+        case .unlocked(let vault), .newVaultPhrase(let vault), .choosingPattern(let vault, _): vault
+        default: nil
+        }
     }
 
     var isBusy: Bool {
@@ -59,7 +66,17 @@ final class Session: ObservableObject {
                 return
             }
             create(pending)
-        case .unlocking, .unlocked:
+        case .choosingPattern(let vault, nil):
+            state = .choosingPattern(vault, first: pattern)
+            message = "Draw the same pattern again to confirm."
+        case .choosingPattern(let vault, let first?):
+            guard pattern == first else {
+                state = .choosingPattern(vault, first: nil)
+                message = "Patterns didn't match. Draw a new pattern."
+                return
+            }
+            Task { await adoptPattern(pattern, for: vault) }
+        case .unlocking, .unlocked, .newVaultPhrase:
             return
         }
     }
@@ -86,7 +103,10 @@ final class Session: ObservableObject {
                 switch result {
                 case .found(let vault):
                     AttemptThrottle.reset()
-                    await open(vault)
+                    if await vault.snapshot().settings.isDuress {
+                        _ = try? await vault.wipeOtherVaults()
+                    }
+                    await enter(vault, as: { .unlocked($0) })
                 case .notFound(let pending):
                     AttemptThrottle.recordMiss()
                     state = .confirmingNew(first: pattern, pending: pending)
@@ -105,9 +125,13 @@ final class Session: ObservableObject {
         message = nil
         Task {
             do {
-                let vault = try await Task.detached(priority: .userInitiated) { try pending.create() }.value
+                let vault = try await Task.detached(priority: .userInitiated) {
+                    let vault = try pending.create()
+                    try await vault.setRecoveryPhrase(try RecoveryPhrase.generate())
+                    return vault
+                }.value
                 AttemptThrottle.reset()
-                await open(vault)
+                await enter(vault, as: { .newVaultPhrase($0) })
             } catch {
                 guard case .unlocking = state else { return }
                 state = .locked
@@ -116,12 +140,71 @@ final class Session: ObservableObject {
         }
     }
 
-    func open(_ vault: Vault) async {
+    /// Loads the snapshot and switches state, unless the app locked in the meantime.
+    private func enter(_ vault: Vault, as makeState: (Vault) -> State) async {
         let loaded = await vault.snapshot()
-        // If the app went to the background while unlocking, stay locked.
         guard case .unlocking = state else { return }
         snapshot = loaded
+        state = makeState(vault)
+    }
+
+    /// After the new-vault phrase screen. A custom phrase replaces the generated one.
+    func finishPhraseSetup(customPhrase: String?) async -> Bool {
+        guard case .newVaultPhrase(let vault) = state else { return false }
+        if let customPhrase {
+            do {
+                try RecoveryPhrase.validateCustom(customPhrase)
+                try await vault.setRecoveryPhrase(customPhrase)
+            } catch let error as RecoveryPhrase.ValidationError {
+                message = error.message
+                return false
+            } catch {
+                message = "Couldn't save the phrase. (\(error.localizedDescription))"
+                return false
+            }
+        }
+        snapshot = await vault.snapshot()
         state = .unlocked(vault)
+        return true
+    }
+
+    /// Opens a vault on this device with its recovery phrase, then asks for a new pattern.
+    func recover(phrase: String) async -> Bool {
+        guard let storage, case .locked = state else { return false }
+        state = .unlocking
+        message = nil
+        do {
+            let vault = try await Task.detached(priority: .userInitiated) {
+                try Vault.recover(phrase: phrase, storage: storage)
+            }.value
+            guard case .unlocking = state else { return false }
+            guard let vault else {
+                state = .locked
+                message = "No vault on this device opens with that phrase."
+                return false
+            }
+            await enter(vault, as: { .choosingPattern($0, first: nil) })
+            message = "Phrase accepted. Draw a new pattern for this vault."
+            return true
+        } catch {
+            if case .unlocking = state { state = .locked }
+            message = "Couldn't recover. (\(error.localizedDescription))"
+            return false
+        }
+    }
+
+    private func adoptPattern(_ pattern: Pattern, for vault: Vault) async {
+        state = .unlocking
+        do {
+            try await Task.detached(priority: .userInitiated) {
+                try await vault.changePattern(to: pattern, deviceSalt: try Keychain.deviceSalt())
+            }.value
+            await enter(vault, as: { .unlocked($0) })
+        } catch {
+            guard case .unlocking = state else { return }
+            state = .choosingPattern(vault, first: nil)
+            message = error.localizedDescription
+        }
     }
 
     func lock() {
@@ -131,6 +214,36 @@ final class Session: ObservableObject {
         progress = nil
         thumbnails.removeAllObjects()
         TempFiles.wipe()
+    }
+
+    // MARK: Security settings
+
+    func changePattern(to pattern: Pattern) async throws {
+        guard let vault else { return }
+        try await Task.detached(priority: .userInitiated) {
+            try await vault.changePattern(to: pattern, deviceSalt: try Keychain.deviceSalt())
+        }.value
+    }
+
+    func changeRecoveryPhrase(to phrase: String, custom: Bool) async throws {
+        guard let vault else { return }
+        if custom { try RecoveryPhrase.validateCustom(phrase) }
+        try await Task.detached(priority: .userInitiated) {
+            try await vault.setRecoveryPhrase(phrase)
+        }.value
+        await refresh()
+    }
+
+    func setDuress(_ enabled: Bool) async {
+        await perform("Couldn't change duress mode.") { vault in
+            try await vault.updateSettings { $0.isDuress = enabled }
+        }
+    }
+
+    func deleteVault() async {
+        guard let vault else { return }
+        await vault.destroy()
+        lock()
     }
 
     // MARK: Vault actions

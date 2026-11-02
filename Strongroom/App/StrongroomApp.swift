@@ -27,7 +27,9 @@ struct RootView: View {
         switch session.state {
         case .unlocked(let vault):
             VaultView(vault: vault)
-        case .locked, .unlocking, .confirmingNew:
+        case .newVaultPhrase:
+            RecoveryPhraseSetupView()
+        case .locked, .unlocking, .confirmingNew, .choosingPattern:
             UnlockView()
         }
     }
