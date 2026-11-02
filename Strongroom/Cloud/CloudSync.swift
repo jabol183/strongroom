@@ -49,6 +49,8 @@ struct CloudSync: Sendable {
         let id = Self.manifestID(keys)
         let masterKey = vault.masterKey
         let bkey = Self.backupKey(masterKey)
+        // Read once: a retry after a failed first save must not look like a vanished backup.
+        let hadBackup = await vault.index.settings.lastBackupRevision > 0
 
         for _ in 0..<3 {
             try Task.checkCancellation()
@@ -65,7 +67,7 @@ struct CloudSync: Sendable {
                 let needed = Self.blobNames(of: merged).filter { !vault.storage.exists($0) }
                 try await download(Array(needed), backupKey: bkey, into: vault.storage)
                 try await vault.absorb(remoteIndex)
-            } else if await vault.index.settings.lastBackupRevision > 0 {
+            } else if hadBackup {
                 throw BackupError.phraseChangedElsewhere
             }
 
