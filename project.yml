@@ -39,6 +39,10 @@ targets:
         # iCloud backup needs a paid developer account. Set to NO (and remove the
         # CODE_SIGN_ENTITLEMENTS line) to build without iCloud.
         CLOUDKIT_ENABLED: "YES"
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_ALTERNATE_APPICON_NAMES: "AppIcon-Calculator AppIcon-Printer AppIcon-Notes AppIcon-Weather AppIcon-Compass AppIcon-Clock AppIcon-Scanner"
+        ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS: YES
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
         CODE_SIGN_ENTITLEMENTS: Strongroom/Strongroom.entitlements
         TARGETED_DEVICE_FAMILY: "1,2"
         ENABLE_PREVIEWS: YES

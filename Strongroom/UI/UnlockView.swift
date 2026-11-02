@@ -61,8 +61,3 @@ struct UnlockView: View {
         }
     }
 }
-
-/// Placeholder slot for "Join shared vault" (filled in by the sharing feature).
-struct JoinSharedButton: View {
-    var body: some View { EmptyView() }
-}

@@ -15,6 +15,8 @@ final class Session: ObservableObject {
         /// Opened with the recovery phrase; the user draws a new pattern (twice).
         case choosingPattern(Vault, first: Pattern?)
         case unlocked(Vault)
+        /// Someone else's shared vault, opened read-only from a temporary folder.
+        case viewingShare(Vault, allowExport: Bool)
     }
 
     @Published private(set) var state: State = .locked
@@ -33,6 +35,7 @@ final class Session: ObservableObject {
     let thumbnails = NSCache<NSUUID, UIImage>()
     let storage: BlobStorage?
     let backupStore: BackupStore = CloudKitBackupStore()
+    let shareStore: ShareStore = CloudKitShareStore()
     private var syncTask: Task<Void, Never>?
 
     init() {
@@ -44,9 +47,19 @@ final class Session: ObservableObject {
     /// The open vault, in any state where one is open.
     var vault: Vault? {
         switch state {
-        case .unlocked(let vault), .newVaultPhrase(let vault), .choosingPattern(let vault, _): vault
+        case .unlocked(let vault), .newVaultPhrase(let vault), .choosingPattern(let vault, _), .viewingShare(let vault, _): vault
         default: nil
         }
+    }
+
+    var isReadOnly: Bool {
+        if case .viewingShare = state { return true }
+        return false
+    }
+
+    var canExport: Bool {
+        if case .viewingShare(_, let allowExport) = state { return allowExport }
+        return true
     }
 
     var isBusy: Bool {
@@ -86,7 +99,7 @@ final class Session: ObservableObject {
                 return
             }
             Task { await adoptPattern(pattern, for: vault) }
-        case .unlocking, .unlocked, .newVaultPhrase:
+        case .unlocking, .unlocked, .newVaultPhrase, .viewingShare:
             return
         }
     }
@@ -156,7 +169,10 @@ final class Session: ObservableObject {
         guard case .unlocking = state else { return }
         snapshot = loaded
         state = makeState(vault)
-        if case .unlocked = state { scheduleSync(after: .seconds(1)) }
+        if case .unlocked = state {
+            scheduleSync(after: .seconds(1))
+            Task { await cleanUpExpiredShares() }
+        }
     }
 
     /// After the new-vault phrase screen. A custom phrase replaces the generated one.
@@ -285,6 +301,58 @@ final class Session: ObservableObject {
         }
         await vault.destroy()
         lock()
+    }
+
+    // MARK: Sharing
+
+    /// Opens someone's shared vault by its share phrase.
+    func joinShare(phrase: String) async -> Bool {
+        guard case .locked = state else { return false }
+        guard CloudKitBackupStore.isConfigured else {
+            message = "Shared vaults need iCloud, which isn't enabled in this build."
+            return false
+        }
+        state = .unlocking
+        message = nil
+        progress = ("Downloading", 0, 1)
+        defer { progress = nil }
+        do {
+            let storage = try BlobStorage(root: TempFiles.directory.appendingPathComponent("share-\(UUID().uuidString)", isDirectory: true))
+            let opened = try await ShareService(store: shareStore).open(phrase: phrase, into: storage) { done, total in
+                Task { @MainActor [weak self] in self?.progress = ("Downloading", done, total) }
+            }
+            guard case .unlocking = state else { return false }
+            await enter(opened.vault, as: { .viewingShare($0, allowExport: opened.allowExport) })
+            return true
+        } catch {
+            if case .unlocking = state { state = .locked }
+            message = error.localizedDescription
+            return false
+        }
+    }
+
+    /// Uploads a snapshot of the open vault as a share. Returns the share phrase.
+    func createShare(policy: SharePolicy) async throws -> String {
+        guard let vault, case .unlocked = state else { throw VaultError.itemNotFound }
+        try await CloudKitBackupStore.checkAvailable()
+        progress = ("Uploading", 0, 1)
+        defer { progress = nil }
+        let phrase = try await ShareService(store: shareStore).create(from: vault, policy: policy)
+        await refresh()
+        scheduleSync()
+        return phrase
+    }
+
+    func revokeShare(_ share: VaultIndex.ShareRecord) async {
+        let store = shareStore
+        await perform("Couldn't revoke the share.") { try await ShareService(store: store).revoke(share, in: $0) }
+    }
+
+    private func cleanUpExpiredShares() async {
+        let now = Date()
+        let expired = snapshot.settings.shares.filter { ($0.expiresAt ?? .distantFuture) < now }
+        guard !expired.isEmpty, (try? await CloudKitBackupStore.checkAvailable()) != nil else { return }
+        for share in expired { await revokeShare(share) }
     }
 
     // MARK: Backup & sync
