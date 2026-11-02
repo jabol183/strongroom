@@ -54,7 +54,7 @@ struct FolderView: View {
     private var sections: [DaySection] { DaySection.group(items) }
 
     private var title: String {
-        guard let folderID else { return "Vault" }
+        guard let folderID else { return session.isReadOnly ? "Shared Vault" : "Vault" }
         return session.snapshot.folders.first { $0.id == folderID }?.name ?? "Folder"
     }
 
@@ -98,7 +98,9 @@ struct FolderView: View {
                     ContentUnavailableView(
                         folderID == nil ? "Empty vault" : "Empty folder",
                         systemImage: "lock.rectangle.stack",
-                        description: Text("Tap + to add photos, videos, files or notes. Everything is encrypted as it comes in.")
+                        description: Text(session.isReadOnly
+                            ? "Nothing has been shared here."
+                            : "Tap + to add photos, videos, files or notes. Everything is encrypted as it comes in.")
                     )
                 }
             }
@@ -128,12 +130,16 @@ struct FolderView: View {
             .ignoresSafeArea()
         }
         .fullScreenCover(item: $viewer) { request in
-            MediaPager(vault: vault, items: request.items, currentID: request.startID)
-                .environmentObject(session)
+            MediaPager(
+                vault: vault, items: request.items, currentID: request.startID,
+                allowExport: session.canExport, allowDelete: !session.isReadOnly
+            )
+            .captureShield(active: !session.canExport)
+            .environmentObject(session)
         }
         .quickLookPreview($previewURL)
         .sheet(item: $noteDraft) { draft in
-            NoteEditor(vault: vault, draft: draft)
+            NoteEditor(vault: vault, draft: draft, readOnly: session.isReadOnly)
                 .environmentObject(session)
         }
         .sheet(item: $moveRequest) { request in
@@ -187,22 +193,38 @@ struct FolderView: View {
                 }
             }
             ToolbarItemGroup(placement: .bottomBar) {
-                Button { moveRequest = MoveRequest(itemIDs: selection, folderID: nil) } label: {
-                    Label("Move", systemImage: "folder")
+                if !session.isReadOnly {
+                    Button { moveRequest = MoveRequest(itemIDs: selection, folderID: nil) } label: {
+                        Label("Move", systemImage: "folder")
+                    }
+                    .disabled(selection.isEmpty)
+                    Spacer()
                 }
-                .disabled(selection.isEmpty)
-                Spacer()
                 Button { Task { await export(selectedItems) } } label: {
                     Label("Export", systemImage: "square.and.arrow.up")
                 }
                 .disabled(selection.isEmpty)
-                Spacer()
-                Button(role: .destructive) {
-                    pendingDelete = .items(selection)
-                } label: {
-                    Label("Delete", systemImage: "trash")
+                if !session.isReadOnly {
+                    Spacer()
+                    Button(role: .destructive) {
+                        pendingDelete = .items(selection)
+                    } label: {
+                        Label("Delete", systemImage: "trash")
+                    }
+                    .disabled(selection.isEmpty)
                 }
-                .disabled(selection.isEmpty)
+            }
+        } else if session.isReadOnly {
+            if folderID == nil {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button("Close") { session.lock() }
+                }
+            }
+            if session.canExport {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Select") { isSelecting = true }
+                        .disabled(items.isEmpty)
+                }
             }
         } else {
             if folderID == nil {
@@ -263,12 +285,14 @@ struct FolderView: View {
         .buttonStyle(.plain)
         .disabled(isSelecting)
         .contextMenu {
-            Button { prompt(.renameFolder(folder.id), initial: folder.name) } label: { Label("Rename", systemImage: "pencil") }
-            Button {
-                moveRequest = MoveRequest(itemIDs: [], folderID: folder.id)
-            } label: { Label("Move", systemImage: "folder") }
-            Button(role: .destructive) { pendingDelete = .folder(folder.id, folder.name) } label: {
-                Label("Delete", systemImage: "trash")
+            if !session.isReadOnly {
+                Button { prompt(.renameFolder(folder.id), initial: folder.name) } label: { Label("Rename", systemImage: "pencil") }
+                Button {
+                    moveRequest = MoveRequest(itemIDs: [], folderID: folder.id)
+                } label: { Label("Move", systemImage: "folder") }
+                Button(role: .destructive) { pendingDelete = .folder(folder.id, folder.name) } label: {
+                    Label("Delete", systemImage: "trash")
+                }
             }
         }
     }
@@ -282,10 +306,16 @@ struct FolderView: View {
 
     @ViewBuilder
     private func itemMenu(_ item: VaultIndex.Item) -> some View {
-        Button { prompt(.renameItem(item.id), initial: item.name) } label: { Label("Rename", systemImage: "pencil") }
-        Button { moveRequest = MoveRequest(itemIDs: [item.id], folderID: nil) } label: { Label("Move", systemImage: "folder") }
-        Button { Task { await export([item]) } } label: { Label("Export", systemImage: "square.and.arrow.up") }
-        Button(role: .destructive) { pendingDelete = .items([item.id]) } label: { Label("Delete", systemImage: "trash") }
+        if !session.isReadOnly {
+            Button { prompt(.renameItem(item.id), initial: item.name) } label: { Label("Rename", systemImage: "pencil") }
+            Button { moveRequest = MoveRequest(itemIDs: [item.id], folderID: nil) } label: { Label("Move", systemImage: "folder") }
+        }
+        if session.canExport {
+            Button { Task { await export([item]) } } label: { Label("Export", systemImage: "square.and.arrow.up") }
+        }
+        if !session.isReadOnly {
+            Button(role: .destructive) { pendingDelete = .items([item.id]) } label: { Label("Delete", systemImage: "trash") }
+        }
     }
 
     private var selectedItems: [VaultIndex.Item] {
@@ -304,6 +334,10 @@ struct FolderView: View {
         case .note:
             noteDraft = NoteDraft(item: item, folderID: item.folderID)
         case .file:
+            guard session.canExport else {
+                session.message = "This shared vault doesn't allow opening files, because previews can be saved outside the app."
+                return
+            }
             Task {
                 if let url = await session.exportURLs(for: [item]).first { previewURL = url }
             }

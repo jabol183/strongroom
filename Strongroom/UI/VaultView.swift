@@ -12,6 +12,7 @@ struct VaultView: View {
                     FolderView(vault: vault, folderID: folderID)
                 }
         }
+        .captureShield(active: !session.canExport)
         .safeAreaInset(edge: .bottom) {
             if let progress = session.progress {
                 ProgressView(value: Double(progress.done), total: Double(max(progress.total, 1))) {

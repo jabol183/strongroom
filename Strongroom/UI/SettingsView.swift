@@ -60,6 +60,11 @@ struct SettingsView: View {
                 }
 
                 Section {
+                    NavigationLink("Shared links") { SharesView().environmentObject(session) }
+                    NavigationLink("App icon") { AppIconPicker() }
+                }
+
+                Section {
                     Toggle("Back up to iCloud", isOn: backupBinding)
                         .disabled(!CloudKitBackupStore.isConfigured)
                     LabeledContent("Status") {
