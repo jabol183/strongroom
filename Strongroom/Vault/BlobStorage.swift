@@ -47,6 +47,14 @@ struct BlobStorage: Sendable {
         try data.write(to: url(for: name), options: [.atomic, .completeFileProtection])
     }
 
+    /// Copies a downloaded file in under `name`, replacing any existing blob.
+    func importFile(from source: URL, as name: String) throws {
+        let destination = url(for: name)
+        try? FileManager.default.removeItem(at: destination)
+        try FileManager.default.copyItem(at: source, to: destination)
+        try FileManager.default.setAttributes([.protectionKey: FileProtectionType.complete], ofItemAtPath: destination.path)
+    }
+
     func delete(_ name: String) {
         try? FileManager.default.removeItem(at: url(for: name))
     }

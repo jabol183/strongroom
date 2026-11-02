@@ -8,6 +8,31 @@ struct SettingsView: View {
     @State private var showPatternChange = false
     @State private var confirmDuress = false
     @State private var confirmDelete = false
+    @State private var confirmBackupOff = false
+
+    private var backupBinding: Binding<Bool> {
+        Binding(
+            get: { session.snapshot.settings.backupEnabled },
+            set: { enabled in
+                if enabled {
+                    Task { await session.setBackup(enabled: true) }
+                } else {
+                    confirmBackupOff = true
+                }
+            }
+        )
+    }
+
+    private var syncStatus: String {
+        guard CloudKitBackupStore.isConfigured else { return "Not available in this build" }
+        guard session.snapshot.settings.backupEnabled else { return "Off" }
+        switch session.syncState {
+        case .idle: return session.snapshot.settings.lastBackupRevision > 0 ? "Backed up" : "Waiting"
+        case .syncing: return "Backing up…"
+        case .synced(let date): return "Backed up \(date.formatted(.relative(presentation: .named)))"
+        case .failed(let reason): return reason
+        }
+    }
 
     private var duressBinding: Binding<Bool> {
         Binding(
@@ -35,6 +60,20 @@ struct SettingsView: View {
                 }
 
                 Section {
+                    Toggle("Back up to iCloud", isOn: backupBinding)
+                        .disabled(!CloudKitBackupStore.isConfigured)
+                    LabeledContent("Status") {
+                        Text(syncStatus).multilineTextAlignment(.trailing)
+                    }
+                    Button("Back Up Now") { session.syncNow() }
+                        .disabled(!session.snapshot.settings.backupEnabled || session.syncState == .syncing || !CloudKitBackupStore.isConfigured)
+                } header: {
+                    Text("iCloud Backup & Sync")
+                } footer: {
+                    Text("Everything is encrypted on this device before it goes to your private iCloud database. To restore on a new phone, or to use this vault on both iPhone and iPad, choose “Use recovery phrase” on the other device. Changes then sync both ways.")
+                }
+
+                Section {
                     Toggle("Duress vault", isOn: duressBinding)
                 } footer: {
                     Text("When this vault is opened with its pattern, every other vault on this device is deleted from the device first. Encrypted iCloud backups stay, so the others can still be recovered later with their phrases.")
@@ -56,7 +95,7 @@ struct SettingsView: View {
                 Section {
                     Button("Delete this vault", role: .destructive) { confirmDelete = true }
                 } footer: {
-                    Text("Removes this vault and everything in it from this device.")
+                    Text("Removes this vault and everything in it from this device and from iCloud.")
                 }
             }
             .navigationTitle("Settings")
@@ -73,13 +112,19 @@ struct SettingsView: View {
             } message: {
                 Text("The next time this vault is opened with its pattern, all other vaults on this device will be deleted from the device. Only turn this on for a decoy vault.")
             }
+            .alert("Turn off iCloud backup?", isPresented: $confirmBackupOff) {
+                Button("Turn Off and Delete", role: .destructive) { Task { await session.setBackup(enabled: false) } }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("The encrypted copy in iCloud is deleted. Without it, losing this phone means losing this vault, even with the recovery phrase.")
+            }
             .confirmationDialog("Delete this vault?", isPresented: $confirmDelete, titleVisibility: .visible) {
                 Button("Delete Vault", role: .destructive) {
                     dismiss()
                     Task { await session.deleteVault() }
                 }
             } message: {
-                Text("Everything in it is removed from this device. This can't be undone here.")
+                Text("Everything in it is removed from this device and from iCloud backup. This can't be undone.")
             }
         }
     }
