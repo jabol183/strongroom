@@ -47,7 +47,7 @@ struct CloudSync: Sendable {
     func sync(_ vault: Vault) async throws -> Int {
         let keys = try await vault.recoveryKeys(iterations: iterations)
         let id = Self.manifestID(keys)
-        let masterKey = await vault.masterKey
+        let masterKey = vault.masterKey
         let bkey = Self.backupKey(masterKey)
 
         for _ in 0..<3 {
@@ -63,7 +63,7 @@ struct CloudSync: Sendable {
                 // Download blobs the merged index needs but this device lacks.
                 let merged = VaultMerge.merge(await vault.index, remoteIndex)
                 let needed = Self.blobNames(of: merged).filter { !vault.storage.exists($0) }
-                try await download(needed, backupKey: bkey, into: vault.storage)
+                try await download(Array(needed), backupKey: bkey, into: vault.storage)
                 try await vault.absorb(remoteIndex)
             } else if await vault.index.settings.lastBackupRevision > 0 {
                 throw BackupError.phraseChangedElsewhere
@@ -126,7 +126,7 @@ struct CloudSync: Sendable {
     func rekey(_ vault: Vault, from old: RecoveryKeys, to new: RecoveryKeys) async throws {
         let oldID = Self.manifestID(old)
         guard let remote = try await store.fetchManifest(oldID) else { return }
-        let masterKey = await vault.masterKey
+        let masterKey = vault.masterKey
         try await store.saveManifest(
             Self.manifestID(new),
             wrapped: try Self.sealHeader(masterKey: masterKey, indexName: vault.indexName, keys: new),
@@ -141,7 +141,7 @@ struct CloudSync: Sendable {
         let keys = try await vault.recoveryKeys(iterations: iterations)
         let id = Self.manifestID(keys)
         guard let remote = try await store.fetchManifest(id) else { return }
-        let bkey = Self.backupKey(await vault.masterKey)
+        let bkey = Self.backupKey(vault.masterKey)
         if let payload = try? Self.openPayload(remote.payload, backupKey: bkey) {
             try await store.deleteBlobs(payload.blobNames.map { Self.blobRecordName($0, backupKey: bkey) })
         }
