@@ -6,6 +6,9 @@ enum VaultError: LocalizedError {
     case itemNotFound
     case folderNotFound
     case invalidMove
+    case patternInUse
+    case phraseInUse
+    case noRecoveryPhrase
 
     var errorDescription: String? {
         switch self {
@@ -13,6 +16,9 @@ enum VaultError: LocalizedError {
         case .itemNotFound: "That item no longer exists."
         case .folderNotFound: "That folder no longer exists."
         case .invalidMove: "A folder can't be moved inside itself."
+        case .patternInUse: "That pattern already opens a vault. Choose a different one."
+        case .phraseInUse: "That phrase already opens another vault. Choose a different one."
+        case .noRecoveryPhrase: "This vault has no recovery phrase yet."
         }
     }
 }
@@ -64,13 +70,16 @@ actor Vault {
     let indexName: String
     private let indexKey: SymmetricKey
     private(set) var index: VaultIndex
+    /// The pattern header this vault was opened with on this device (nil if opened by recovery phrase).
+    private(set) var openedHeaderName: String?
 
-    init(storage: BlobStorage, masterKey: SymmetricKey, indexName: String, index: VaultIndex) {
+    init(storage: BlobStorage, masterKey: SymmetricKey, indexName: String, index: VaultIndex, openedHeaderName: String? = nil) {
         self.storage = storage
         self.masterKey = masterKey
         self.indexKey = KDF.subkey(masterKey, info: "strongroom.index.v1")
         self.indexName = indexName
         self.index = index
+        self.openedHeaderName = openedHeaderName
     }
 
     // MARK: Opening
@@ -95,7 +104,8 @@ actor Vault {
     }
 
     /// Opens the vault whose header lives at `headerName`, or returns nil if there's no such header.
-    static func open(headerName: String, wrapKey: SymmetricKey, storage: BlobStorage) throws -> Vault? {
+    /// `isPatternHeader` is false when opening with the recovery phrase.
+    static func open(headerName: String, wrapKey: SymmetricKey, storage: BlobStorage, isPatternHeader: Bool = true) throws -> Vault? {
         guard storage.exists(headerName) else { return nil }
         let header: VaultHeader
         do {
@@ -106,7 +116,7 @@ actor Vault {
         }
         let masterKey = SymmetricKey(data: header.masterKey)
         let index = try readIndex(name: header.indexName, masterKey: masterKey, storage: storage)
-        return Vault(storage: storage, masterKey: masterKey, indexName: header.indexName, index: index)
+        return Vault(storage: storage, masterKey: masterKey, indexName: header.indexName, index: index, openedHeaderName: isPatternHeader ? headerName : nil)
     }
 
     static func readIndex(name: String, masterKey: SymmetricKey, storage: BlobStorage) throws -> VaultIndex {
@@ -134,7 +144,7 @@ actor Vault {
             index.settings = settings
             try Vault.writeIndex(index, name: indexName, masterKey: masterKey, storage: storage)
             try Vault.writeHeader(masterKey: masterKey, indexName: indexName, wrapKey: keys.wrapKey, name: keys.headerName, storage: storage)
-            return Vault(storage: storage, masterKey: masterKey, indexName: indexName, index: index)
+            return Vault(storage: storage, masterKey: masterKey, indexName: indexName, index: index, openedHeaderName: keys.headerName)
         }
     }
 
@@ -363,6 +373,65 @@ actor Vault {
 
     func updateSettings(_ change: (inout VaultIndex.Settings) -> Void) throws {
         try mutate { change(&$0.settings) }
+    }
+
+    // MARK: Security
+
+    /// Opens a vault on this device with its recovery phrase, or returns nil if none matches here.
+    static func recover(phrase: String, storage: BlobStorage, iterations: UInt32 = KDF.productionIterations) throws -> Vault? {
+        let keys = try RecoveryKeys.derive(phrase: phrase, iterations: iterations)
+        return try open(headerName: keys.headerName, wrapKey: keys.wrapKey, storage: storage, isPatternHeader: false)
+    }
+
+    /// Sets (or replaces) the recovery phrase: writes a header the phrase opens and removes the old one.
+    func setRecoveryPhrase(_ phrase: String, iterations: UInt32 = KDF.productionIterations) throws {
+        let normalized = RecoveryPhrase.normalize(phrase)
+        let keys = try RecoveryKeys.derive(phrase: normalized, iterations: iterations)
+        let newName = keys.headerName
+        if newName != index.settings.recoveryHeaderName, storage.exists(newName) {
+            throw VaultError.phraseInUse
+        }
+        try Self.writeHeader(masterKey: masterKey, indexName: indexName, wrapKey: keys.wrapKey, name: newName, storage: storage)
+        let oldName = index.settings.recoveryHeaderName
+        try mutate {
+            $0.settings.recoveryPhrase = normalized
+            $0.settings.recoveryHeaderName = newName
+        }
+        if let oldName, oldName != newName { storage.delete(oldName) }
+    }
+
+    /// Makes `pattern` open this vault on this device and retires the pattern it was opened with.
+    func changePattern(to pattern: Pattern, deviceSalt: Data, iterations: UInt32 = KDF.productionIterations) throws {
+        let keys = try PatternKeys.derive(patternEncoding: pattern.encoded, deviceSalt: deviceSalt, iterations: iterations)
+        let newName = keys.headerName
+        if newName == openedHeaderName { return }
+        if storage.exists(newName) { throw VaultError.patternInUse }
+        try Self.writeHeader(masterKey: masterKey, indexName: indexName, wrapKey: keys.wrapKey, name: newName, storage: storage)
+        if let old = openedHeaderName { storage.delete(old) }
+        openedHeaderName = newName
+    }
+
+    /// Duress: deletes every blob on this device that doesn't belong to this vault, including
+    /// other vaults' headers, indexes, files and recovery headers. Returns how many were removed.
+    @discardableResult
+    func wipeOtherVaults() throws -> Int {
+        var keep = ownedBlobNames()
+        if let opened = openedHeaderName { keep.insert(opened) }
+        if let recovery = index.settings.recoveryHeaderName { keep.insert(recovery) }
+        var removed = 0
+        for name in try storage.allNames() where !keep.contains(name) {
+            storage.delete(name)
+            removed += 1
+        }
+        return removed
+    }
+
+    /// Deletes this vault from the device: items, index and every header that opens it.
+    func destroy() {
+        for name in ownedBlobNames() { storage.delete(name) }
+        if let opened = openedHeaderName { storage.delete(opened) }
+        if let recovery = index.settings.recoveryHeaderName { storage.delete(recovery) }
+        index = VaultIndex()
     }
 
     // MARK: Persistence
