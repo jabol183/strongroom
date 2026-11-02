@@ -24,6 +24,7 @@ targets:
         UILaunchScreen: {}
         UIApplicationSupportsIndirectInputEvents: true
         UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
+        StrongroomCloudKit: $(CLOUDKIT_ENABLED)
         NSCameraUsageDescription: Take photos and videos straight into your vault. Nothing is saved to your camera roll.
         NSMicrophoneUsageDescription: Record sound with videos you capture into your vault.
         NSPhotoLibraryUsageDescription: Delete originals from your photo library after you've moved them into the vault.
@@ -35,6 +36,10 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.example.strongroom
+        # iCloud backup needs a paid developer account. Set to NO (and remove the
+        # CODE_SIGN_ENTITLEMENTS line) to build without iCloud.
+        CLOUDKIT_ENABLED: "YES"
+        CODE_SIGN_ENTITLEMENTS: Strongroom/Strongroom.entitlements
         TARGETED_DEVICE_FAMILY: "1,2"
         ENABLE_PREVIEWS: YES
 

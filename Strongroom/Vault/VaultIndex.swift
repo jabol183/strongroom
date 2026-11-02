@@ -68,6 +68,10 @@ struct VaultIndex: Codable, Sendable {
         var isDuress = false
         var backupEnabled = true
         var shares: [ShareRecord] = []
+        /// When any setting last changed; the newer settings win when devices merge.
+        var modifiedAt: Date?
+        /// Highest backup revision this vault has written or read. Non-zero means a cloud copy exists.
+        var lastBackupRevision = 0
 
         init() {}
 
@@ -78,6 +82,8 @@ struct VaultIndex: Codable, Sendable {
             isDuress = try c.decodeIfPresent(Bool.self, forKey: .isDuress) ?? false
             backupEnabled = try c.decodeIfPresent(Bool.self, forKey: .backupEnabled) ?? true
             shares = try c.decodeIfPresent([ShareRecord].self, forKey: .shares) ?? []
+            modifiedAt = try c.decodeIfPresent(Date.self, forKey: .modifiedAt)
+            lastBackupRevision = try c.decodeIfPresent(Int.self, forKey: .lastBackupRevision) ?? 0
         }
     }
 

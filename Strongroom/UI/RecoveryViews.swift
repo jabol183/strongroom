@@ -116,7 +116,18 @@ struct RecoveryEntryView: View {
                         .disabled(working || RecoveryPhrase.normalize(phrase).isEmpty)
                 }
             }
-            .overlay { if working { ProgressView("Checking…") } }
+            .overlay {
+                if working {
+                    if let progress = session.progress {
+                        ProgressView(value: Double(progress.done), total: Double(max(progress.total, 1))) {
+                            Text("Restoring from iCloud…")
+                        }
+                        .padding(40)
+                    } else {
+                        ProgressView("Checking…")
+                    }
+                }
+            }
         }
     }
 

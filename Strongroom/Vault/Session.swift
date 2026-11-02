@@ -21,9 +21,19 @@ final class Session: ObservableObject {
     @Published private(set) var snapshot = VaultSnapshot()
     @Published var message: String?
     @Published private(set) var progress: (label: String, done: Int, total: Int)?
+    @Published private(set) var syncState: SyncState = .idle
+
+    enum SyncState: Equatable {
+        case idle
+        case syncing
+        case synced(Date)
+        case failed(String)
+    }
 
     let thumbnails = NSCache<NSUUID, UIImage>()
     let storage: BlobStorage?
+    let backupStore: BackupStore = CloudKitBackupStore()
+    private var syncTask: Task<Void, Never>?
 
     init() {
         TempFiles.wipe()
@@ -146,6 +156,7 @@ final class Session: ObservableObject {
         guard case .unlocking = state else { return }
         snapshot = loaded
         state = makeState(vault)
+        if case .unlocked = state { scheduleSync(after: .seconds(1)) }
     }
 
     /// After the new-vault phrase screen. A custom phrase replaces the generated one.
@@ -165,6 +176,7 @@ final class Session: ObservableObject {
         }
         snapshot = await vault.snapshot()
         state = .unlocked(vault)
+        scheduleSync(after: .seconds(1))
         return true
     }
 
@@ -174,13 +186,17 @@ final class Session: ObservableObject {
         state = .unlocking
         message = nil
         do {
-            let vault = try await Task.detached(priority: .userInitiated) {
+            var found = try await Task.detached(priority: .userInitiated) {
                 try Vault.recover(phrase: phrase, storage: storage)
             }.value
             guard case .unlocking = state else { return false }
-            guard let vault else {
+            if found == nil, CloudKitBackupStore.isConfigured {
+                found = try await restoreFromCloud(phrase: phrase, storage: storage)
+                guard case .unlocking = state else { return false }
+            }
+            guard let vault = found else {
                 state = .locked
-                message = "No vault on this device opens with that phrase."
+                message = "No vault on this device or in iCloud opens with that phrase."
                 return false
             }
             await enter(vault, as: { .choosingPattern($0, first: nil) })
@@ -190,6 +206,15 @@ final class Session: ObservableObject {
             if case .unlocking = state { state = .locked }
             message = "Couldn't recover. (\(error.localizedDescription))"
             return false
+        }
+    }
+
+    private func restoreFromCloud(phrase: String, storage: BlobStorage) async throws -> Vault? {
+        try await CloudKitBackupStore.checkAvailable()
+        progress = ("Downloading", 0, 1)
+        defer { progress = nil }
+        return try await CloudSync.restore(phrase: phrase, storage: storage, store: backupStore) { done, total in
+            Task { @MainActor [weak self] in self?.progress = ("Downloading", done, total) }
         }
     }
 
@@ -208,6 +233,9 @@ final class Session: ObservableObject {
     }
 
     func lock() {
+        syncTask?.cancel()
+        syncTask = nil
+        syncState = .idle
         state = .locked
         snapshot = VaultSnapshot()
         message = nil
@@ -228,10 +256,18 @@ final class Session: ObservableObject {
     func changeRecoveryPhrase(to phrase: String, custom: Bool) async throws {
         guard let vault else { return }
         if custom { try RecoveryPhrase.validateCustom(phrase) }
+        let store = backupStore
+        let hadBackup = snapshot.settings.lastBackupRevision > 0 && CloudKitBackupStore.isConfigured
         try await Task.detached(priority: .userInitiated) {
+            let oldKeys = try? await vault.recoveryKeys()
             try await vault.setRecoveryPhrase(phrase)
+            if hadBackup, let oldKeys {
+                // Best effort: move the backup so the new phrase finds it. Sync retries otherwise.
+                try? await CloudSync(store: store).rekey(vault, from: oldKeys, to: try await vault.recoveryKeys())
+            }
         }.value
         await refresh()
+        scheduleSync()
     }
 
     func setDuress(_ enabled: Bool) async {
@@ -242,8 +278,74 @@ final class Session: ObservableObject {
 
     func deleteVault() async {
         guard let vault else { return }
+        syncTask?.cancel()
+        if snapshot.settings.lastBackupRevision > 0, CloudKitBackupStore.isConfigured {
+            progress = ("Deleting iCloud copy", 0, 1)
+            try? await CloudSync(store: backupStore).deleteBackup(vault)
+        }
         await vault.destroy()
         lock()
+    }
+
+    // MARK: Backup & sync
+
+    func setBackup(enabled: Bool) async {
+        guard let vault else { return }
+        if enabled {
+            await perform("Couldn't turn on backup.") { try await $0.updateSettings { $0.backupEnabled = true } }
+            syncNow()
+            return
+        }
+        syncTask?.cancel()
+        syncState = .idle
+        if snapshot.settings.lastBackupRevision > 0, CloudKitBackupStore.isConfigured {
+            do {
+                try await CloudKitBackupStore.checkAvailable()
+                try await CloudSync(store: backupStore).deleteBackup(vault)
+            } catch {
+                message = "Backup is off, but the iCloud copy couldn't be removed. (\(error.localizedDescription))"
+            }
+        }
+        await perform("Couldn't turn off backup.") {
+            try await $0.updateSettings {
+                $0.backupEnabled = false
+                $0.lastBackupRevision = 0
+            }
+        }
+    }
+
+    func syncNow() {
+        scheduleSync(after: .zero)
+    }
+
+    /// Debounced: bursts of changes produce one sync.
+    func scheduleSync(after delay: Duration = .seconds(4)) {
+        guard let vault, case .unlocked = state, CloudKitBackupStore.isConfigured,
+              snapshot.settings.backupEnabled, snapshot.settings.recoveryPhrase != nil
+        else { return }
+        syncTask?.cancel()
+        syncTask = Task { [weak self] in
+            if delay > .zero { try? await Task.sleep(for: delay) }
+            guard !Task.isCancelled else { return }
+            await self?.runSync(vault)
+        }
+    }
+
+    private func runSync(_ vault: Vault) async {
+        guard self.vault === vault else { return }
+        syncState = .syncing
+        do {
+            try await CloudKitBackupStore.checkAvailable()
+            try await CloudSync(store: backupStore).sync(vault)
+            guard self.vault === vault else { return }
+            syncState = .synced(Date())
+            await refresh()
+        } catch is CancellationError {
+            if self.vault === vault { syncState = .idle }
+        } catch {
+            guard self.vault === vault, !Task.isCancelled else { return }
+            syncState = .failed(error.localizedDescription)
+        }
     }
 
     // MARK: Vault actions
@@ -264,6 +366,7 @@ final class Session: ObservableObject {
             message = "\(failureMessage) (\(error.localizedDescription))"
         }
         await refresh()
+        scheduleSync()
     }
 
     func importFromPhotos(_ selection: [PhotosPickerItem], into folderID: UUID?, deleteOriginals: Bool) async {
@@ -301,6 +404,7 @@ final class Session: ObservableObject {
             await refresh()
         }
         progress = nil
+        scheduleSync()
         if failures > 0 { message = "\(failures) item(s) couldn't be imported." }
         if deleteOriginals, !importedIdentifiers.isEmpty {
             await deleteFromPhotoLibrary(importedIdentifiers)
@@ -324,6 +428,7 @@ final class Session: ObservableObject {
             await refresh()
         }
         progress = nil
+        scheduleSync()
         if failures > 0 { message = "\(failures) file(s) couldn't be imported." }
     }
 
@@ -348,6 +453,7 @@ final class Session: ObservableObject {
         }
         progress = nil
         await refresh()
+        scheduleSync()
     }
 
     /// Decrypts items to temporary files for the share sheet. Wiped on lock.

@@ -72,6 +72,8 @@ actor Vault {
     private(set) var index: VaultIndex
     /// The pattern header this vault was opened with on this device (nil if opened by recovery phrase).
     private(set) var openedHeaderName: String?
+    /// Recovery keys derived this session (PBKDF2 is slow, so derive once).
+    private var cachedRecoveryKeys: RecoveryKeys?
 
     init(storage: BlobStorage, masterKey: SymmetricKey, indexName: String, index: VaultIndex, openedHeaderName: String? = nil) {
         self.storage = storage
@@ -372,7 +374,10 @@ actor Vault {
     }
 
     func updateSettings(_ change: (inout VaultIndex.Settings) -> Void) throws {
-        try mutate { change(&$0.settings) }
+        try mutate {
+            change(&$0.settings)
+            $0.settings.modifiedAt = Date()
+        }
     }
 
     // MARK: Security
@@ -396,8 +401,19 @@ actor Vault {
         try mutate {
             $0.settings.recoveryPhrase = normalized
             $0.settings.recoveryHeaderName = newName
+            $0.settings.modifiedAt = Date()
         }
+        cachedRecoveryKeys = keys
         if let oldName, oldName != newName { storage.delete(oldName) }
+    }
+
+    /// The keys for the current recovery phrase, derived on first use.
+    func recoveryKeys(iterations: UInt32 = KDF.productionIterations) throws -> RecoveryKeys {
+        if let cachedRecoveryKeys { return cachedRecoveryKeys }
+        guard let phrase = index.settings.recoveryPhrase else { throw VaultError.noRecoveryPhrase }
+        let keys = try RecoveryKeys.derive(phrase: phrase, iterations: iterations)
+        cachedRecoveryKeys = keys
+        return keys
     }
 
     /// Makes `pattern` open this vault on this device and retires the pattern it was opened with.
